@@ -178,7 +178,7 @@ fn integration() {
     git(&repo1, "pull origin master").assert().success();
     git(&repo1, "log --oneline --decorate=short -n 1")
         .assert()
-        .stdout(format!("{} (HEAD -> master, origin/master) r2_c1\n", sha));
+        .stdout(format!("{} (HEAD -> master, origin/master, origin/HEAD) r2_c1\n", sha));
 
     println!("test: force push form repo2");
     git(&repo1, "commit --allow-empty -am r1_c2")
@@ -203,7 +203,7 @@ fn integration() {
         format!("log --oneline --decorate=short -n 1 {}", sha2).as_str(),
     )
     .assert()
-    .stdout(format!("{} (HEAD -> master, origin/master) r2_c2\n", sha2));
+    .stdout(format!("{} (HEAD -> master, origin/master, origin/HEAD) r2_c2\n", sha2));
     git(&repo1, "push origin master").assert().success();
     // assert that refs are unchanged on s3
     git(&repo1, "ls-remote origin").assert()
