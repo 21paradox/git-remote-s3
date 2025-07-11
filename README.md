@@ -11,25 +11,26 @@ For example, my use case is periodically backing up a repo from a desktop
 and pull to a laptop to develop remotely.
 
 
+
 Example Usage
 -------------
 
 Add a remote using the `s3` transport:
 ```
-git remote add s3remote s3://my_bucket/prefix
+git remote add origin1 s3::s3://your-bucket-name/your-repo-name.git
 ```
 
 And then you can push/pull to the remote as usual:
 
 ```
-git pull s3remote master
+git pull origin1 master
 
-git push s3remote
+git pull origin1
 ```
 
 Or even clone from s3:
 ```
-git clone s3://my_bucket/prefix
+git clone s3::s3://your-bucket-name/your-repo-name.git
 ```
 
 
@@ -73,5 +74,7 @@ Future improvements
 
 * A better way to notify the user there are multiple heads on s3.
   * Show warning when attempting to push/fetch and there are multiple heads for a branch?
-* Allow disabling gpg with `remote.<name>.gpg`
-* use `gpg.program`
+* ~~Allow disabling gpg with `remote.<name>.gpg`~~
+* ~~use `gpg.program`~~
+
+## **gpg encryption is removed**

@@ -16,32 +16,26 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::io::Write;
 
 pub mod errors {
     error_chain! {}
 }
 use errors::*;
 mod git;
-mod gpg;
-mod s3;
+mod s3;  // 移除了 gpg 模块
 
 quick_main!(run);
 
 struct Settings {
-    //git_dir: PathBuf,
     remote_alias: String,
-    //remote_url: String,
     root: s3::Key,
 }
 
 fn run() -> Result<()> {
-    let region = if let Ok(endpoint) = env::var("S3_ENDPOINT") {
-        Region::Custom {
-            name: String::from("us-east-1"),
-            endpoint,
-        }
-    } else {
-        Region::default()
+    let region = Region::Custom {
+        name: String::from("us-east-1"),
+        endpoint: env::var("S3_ENDPOINT").unwrap_or("http://localhost:5246".to_string()),
     };
 
     let s3 = S3Client::new(region);
@@ -80,8 +74,6 @@ fn run() -> Result<()> {
         .chain_err(|| format!("could not create work dir: {:?}", work_dir))?;
 
     let settings = Settings {
-        //git_dir,
-        //remote_url: url.to_owned(),
         remote_alias: alias,
         root: s3::Key {
             bucket: bucket.to_string(),
@@ -130,16 +122,15 @@ fn fetch_from_s3(s3: &S3Client, settings: &Settings, r: &GitRef) -> Result<()> {
         .tempdir()
         .chain_err(|| "mktemp dir failed")?;
     let bundle_file = tmp_dir.path().join("bundle");
-    let enc_file = tmp_dir.path().join("buncle_enc");
 
     let path = r.bundle_path(settings.root.key.to_owned());
     let o = s3::Key {
         bucket: settings.root.bucket.to_owned(),
         key: path,
     };
-    s3::get(s3, &o, &enc_file)?;
-
-    gpg::decrypt(&enc_file, &bundle_file)?;
+    
+    // 直接下载 bundle 文件，不进行解密
+    s3::get(s3, &o, &bundle_file)?;
 
     git::bundle_unbundle(&bundle_file, &r.name)?;
 
@@ -152,27 +143,16 @@ fn push_to_s3(s3: &S3Client, settings: &Settings, r: &GitRef) -> Result<()> {
         .tempdir()
         .chain_err(|| "mktemp dir failed")?;
     let bundle_file = tmp_dir.path().join("bundle");
-    let enc_file = tmp_dir.path().join("buncle_enc");
 
     git::bundle_create(&bundle_file, &r.name)?;
-
-    let recipients = git::config(&format!("remote.{}.gpgRecipients", settings.remote_alias))
-        .map(|config| {
-            config
-                .split_ascii_whitespace()
-                .map(|s| s.to_string())
-                .collect_vec()
-        })
-        .or_else(|_| git::config("user.email").map(|recip| vec![recip]))?;
-
-    gpg::encrypt(&recipients, &bundle_file, &enc_file)?;
 
     let path = r.bundle_path(settings.root.key.to_owned());
     let o = s3::Key {
         bucket: settings.root.bucket.to_owned(),
         key: path,
     };
-    s3::put(s3, &enc_file, &o)?;
+    // 直接上传 bundle 文件，不进行加密
+    s3::put(s3, &bundle_file, &o)?;
 
     Ok(())
 }
@@ -187,89 +167,112 @@ fn cmd_fetch(s3: &S3Client, settings: &Settings, sha: &str, name: &str) -> Resul
         sha: sha.to_string(),
     };
     fetch_from_s3(s3, settings, &git_ref)?;
-    println!();
+    let _ = writeln!(io::stdout());
     Ok(())
 }
 
 fn cmd_push(s3: &S3Client, settings: &Settings, push_ref: &str) -> Result<()> {
     let force = push_ref.starts_with('+');
-
     let mut split = push_ref.split(':');
 
-    let src_ref = split.next().unwrap();
+    let src_ref = split.next().ok_or("Invalid push reference format")?;
     let src_ref = if force { &src_ref[1..] } else { src_ref };
-    let dst_ref = split.next().unwrap();
+    let dst_ref = split.next().ok_or("Invalid push reference format")?;
 
     if src_ref != dst_ref {
-        bail!("src_ref != dst_ref")
+        println!("error src_ref != dst_ref");
+        println!();
+        return Ok(());
     }
 
-    let all_remote_refs = list_remote_refs(s3, settings)?;
-    let remote_refs = all_remote_refs.get(src_ref);
-    let prev_ref = remote_refs.map(|rs| rs.latest_ref());
-    let local_sha = git::rev_parse(src_ref)?;
-    let local_ref = GitRef {
-        name: src_ref.to_string(),
-        sha: local_sha,
-    };
+    match list_remote_refs(s3, settings) {
+        Ok(all_remote_refs) => {
+            let remote_refs = all_remote_refs.get(src_ref);
+            let prev_ref = remote_refs.map(|rs| rs.latest_ref());
+            let local_sha = git::rev_parse(src_ref)?;
+            let local_ref = GitRef {
+                name: src_ref.to_string(),
+                sha: local_sha,
+            };
 
-    let can_push = force
-        || match prev_ref {
-            Some(prev_ref) => {
-                if !git::is_ancestor(&local_ref.sha, &prev_ref.reference.sha)? {
-                    println!("error {} remote changed: force push to add new ref, the old ref will be kept until its merged)", dst_ref);
-                    false
-                } else {
-                    true
+            let can_push = force || match prev_ref {
+                Some(prev_ref) => {
+                    if !git::is_ancestor(&local_ref.sha, &prev_ref.reference.sha)? {
+                        println!("error {} remote changed: force push to add new ref, the old ref will be kept until its merged)", dst_ref);
+                        println!();
+                        false
+                    } else {
+                        true
+                    }
                 }
-            }
-            None => true,
-        };
+                None => true,
+            };
 
-    if can_push {
-        push_to_s3(s3, settings, &local_ref)?;
+            if can_push {
+                if let Err(e) = push_to_s3(s3, settings, &local_ref) {
+                    println!("error failed to push: {}", e);
+                    println!();
+                    return Ok(());
+                }
 
-        // Delete any ref that is an ancestor of the one we pushed
-        for r in remote_refs.iter().flat_map(|r| r.by_update_time.iter()) {
-            if git::is_ancestor(&local_ref.sha, &r.reference.sha)? {
-                s3::del(s3, &r.object)?;
+                // Delete any ref that is an ancestor of the one we pushed
+                if let Some(remote_refs) = remote_refs {
+                    for r in remote_refs.by_update_time.iter() {
+                        if git::is_ancestor(&local_ref.sha, &r.reference.sha)? {
+                            if let Err(e) = s3::del(s3, &r.object) {
+                                println!("warning failed to delete old ref: {}", e);
+                            }
+                        }
+                    }
+                }
+                let _ = writeln!(io::stdout(), "ok {}", dst_ref);
             }
         }
-
-        println!("ok {}", dst_ref);
-    };
-
-    println!();
+        Err(e) => {
+            println!("error failed to list remote refs: {}", e);
+        }
+    }
+    writeln!(io::stdout());
     Ok(())
 }
 
 // Implement protocol defined here:
 // https://github.com/git/git/blob/master/Documentation/gitremote-helpers.txt
-fn cmd_loop(s3: &S3Client, settings: &Settings) -> Result<()> {
+ fn cmd_loop(s3: &S3Client, settings: &Settings) -> Result<()> {
     loop {
         let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .chain_err(|| "read error")?;
-
-        if input.is_empty() {
+        if io::stdin().read_line(&mut input).is_err() || input.is_empty() {
             return Ok(());
+        }
+
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
         }
 
         let mut iter = input.split_ascii_whitespace();
         let cmd = iter.next();
         let arg1 = iter.next();
         let arg2 = iter.next();
-
-        match (cmd, arg1, arg2) {
+        
+        let result = match (cmd, arg1, arg2) {
             (Some("push"), Some(ref_arg), None) => cmd_push(s3, settings, ref_arg),
             (Some("fetch"), Some(sha), Some(name)) => cmd_fetch(s3, settings, sha, name),
             (Some("capabilities"), None, None) => cmd_capabilities(),
             (Some("list"), None, None) => cmd_list(s3, settings),
             (Some("list"), Some("for-push"), None) => cmd_list(s3, settings),
             (None, None, None) => return Ok(()),
-            _ => cmd_unknown(),
-        }?
+            _ => {
+                println!("error unknown command");
+                println!();
+                Ok(())
+            }
+        };
+
+        if let Err(e) = result {
+            println!("error {}", e);
+            println!();
+        }
     }
 }
 
@@ -333,11 +336,11 @@ fn cmd_list(s3: &S3Client, settings: &Settings) -> Result<()> {
         for (_name, refs) in refs.iter() {
             let mut iter = refs.by_update_time.iter();
             let latest = iter.next().unwrap();
-            println!("{} {}", latest.reference.sha, latest.reference.name);
+            writeln!(io::stdout(), "{} {}", latest.reference.sha, latest.reference.name);
 
             for stale_ref in iter {
                 let short_sha = stale_ref.reference.sha.get(0..7).unwrap();
-                println!(
+                writeln!(io::stdout(),
                     "{} {}__{}",
                     stale_ref.reference.sha, stale_ref.reference.name, short_sha
                 );
@@ -346,10 +349,10 @@ fn cmd_list(s3: &S3Client, settings: &Settings) -> Result<()> {
         // Advertise the HEAD as being the latest master ref
         // this is needed, as git clone checks outs the HEAD
         if refs.contains_key("refs/heads/master") {
-            println!("@refs/heads/master HEAD");
+            writeln!(io::stdout(), "@refs/heads/master HEAD");
         }
     }
-    println!();
+    writeln!(io::stdout());
     Ok(())
 }
 

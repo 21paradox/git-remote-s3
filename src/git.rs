@@ -1,31 +1,46 @@
 use super::errors::*;
 use std::path::Path;
 use std::process::Command;
+use std::process::Stdio;
 
-pub fn bundle_create(bundle: &Path, ref_name: &str) -> Result<()> {
-    let result = Command::new("git")
+pub fn bundle_create(bundle_path: &Path, ref_name: &str) -> Result<()> {
+    let status = Command::new("git")
         .arg("bundle")
         .arg("create")
-        .arg(bundle.to_str().chain_err(|| "bundle path invalid")?)
+        .arg(bundle_path)
         .arg(ref_name)
-        .output()
-        .chain_err(|| "failed to run git")?;
-    if !result.status.success() {
-        bail!("git bundle failed");
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .chain_err(|| "failed to execute git bundle create")?;
+
+    if !status.success() {
+        bail!(
+            "git bundle create failed with status: {}",
+            status
+        );
     }
     Ok(())
 }
 
-pub fn bundle_unbundle(bundle: &Path, ref_name: &str) -> Result<()> {
-    let result = Command::new("git")
+pub fn bundle_unbundle(bundle_path: &Path, ref_name: &str) -> Result<()> {
+    let status = Command::new("git")
         .arg("bundle")
         .arg("unbundle")
-        .arg(bundle.to_str().chain_err(|| "bundle path invalid")?)
+        .arg(bundle_path)
         .arg(ref_name)
-        .output()
-        .chain_err(|| "failed to run git")?;
-    if !result.status.success() {
-        bail!("git unbundle failed");
+        // This is the critical part: redirect the command's stdout and stderr
+        // so they don't interfere with the remote helper protocol.
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .chain_err(|| "failed to execute git bundle unbundle")?;
+
+    if !status.success() {
+        bail!(
+            "git bundle unbundle failed with status: {}",
+            status
+        );
     }
     Ok(())
 }
